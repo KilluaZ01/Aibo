@@ -43,6 +43,10 @@ _MUSIC_PATTERNS = re.compile(
     re.IGNORECASE,
 )
 
+_NAME_START = re.compile(
+    rf"^\s*((hey|hi|ok|okay|yo)\s+)?{re.escape(settings.bot_name)}\b", re.I
+)
+
 # Per-channel: last time the bot sent a message { channel_id: datetime }
 _bot_last_spoke: dict[int, datetime] = defaultdict(lambda: datetime.min)
 
@@ -76,8 +80,9 @@ def should_process(message: discord.Message, bot_user: discord.ClientUser) -> bo
             log.debug("Router: reply to bot — processing")
             return True
 
-    # 3. Called by name ("aibo play something")
-    if re.search(rf"\b{re.escape(settings.bot_name)}\b", message.content, re.I):
+    # 3. Starts with its name ("AI play something", "hey AI …"). Only at the
+    # start: "AI" also shows up in normal chat about AI and the other bots.
+    if _NAME_START.match(message.content):
         log.debug("Router: called by name — processing")
         return True
 
@@ -106,4 +111,8 @@ def strip_mention(content: str, bot_user: discord.ClientUser) -> str:
     for mention in mention_variants:
         if result.startswith(mention):
             result = result[len(mention):].strip()
+    # "AI, play ocean eyes" → "play ocean eyes" (so clear commands skip the LLM)
+    named = _NAME_START.match(result)
+    if named and result[named.end():].strip(" ,:!"):
+        result = result[named.end():].strip(" ,:!")
     return result

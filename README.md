@@ -2,6 +2,7 @@
 
 Aibo joins your voice channel, plays music, and listens for its name.
 Say **"Aibo, play K by Cigarettes After Sex"** out loud, or type it. No slash commands.
+Ask out loud and Aibo answers out loud, talking over the music.
 
 It reads how you're feeling ("aibo rough day, play something") and answers that first,
 then picks a song that fits.
@@ -43,7 +44,7 @@ cp .env.example .env
 python bot.py
 ```
 
-The first start downloads the speech model (~150 MB for `base`).
+Speech-to-text uses Google's free speech API and the voice uses free Microsoft neural voices, so there's nothing to download and no extra keys.
 
 ---
 
@@ -65,8 +66,8 @@ remove the second song / leave the vc
 - "Aibo, play Apocalypse" — all in one breath, or
 - "Aibo" … *(the music dips, so you know it heard)* … "play something chill"
 
-The request and the answer show up in the voice channel's text chat
-(or wherever you last typed to Aibo).
+Aibo answers out loud (the music dips while it talks), and the request and answer
+also show up in the voice channel's text chat (or wherever you last typed to Aibo).
 
 ---
 
@@ -75,7 +76,7 @@ The request and the answer show up in the voice channel's text chat
 ```
 Voice chat audio (per person)            Typed message
       ↓ phrase ends after ~0.7 s silence       ↓
-Speech-to-text (local Whisper)                 │
+Speech-to-text (Google)                        │
       ↓ starts with "Aibo"?                    │
       └──────────────┬─────────────────────────┘
                      ↓
@@ -89,7 +90,9 @@ Speech-to-text (local Whisper)                 │
 | File | Job |
 |---|---|
 | `voice/listener.py` | Hears each person, splits phrases, catches the wake word, ducks the music |
-| `voice/stt.py` | Speech-to-text: local faster-whisper or Hugging Face Whisper |
+| `voice/stt.py` | Speech-to-text: Google (default), local faster-whisper, or Hugging Face Whisper |
+| `voice/tts.py` | Text-to-speech: Edge neural voices (default) or Google Translate voice |
+| `music/mixer.py` | Plays Aibo's voice over the song instead of stopping it |
 | `ai/intent.py` | Understands clear commands without the LLM |
 | `ai/client.py` | Hugging Face model chain, rate limit, JSON decisions, replies |
 | `ai/prompts.py` | Aibo's personality and rules |
@@ -101,8 +104,10 @@ Speech-to-text (local Whisper)                 │
 
 ### Privacy
 
-Phrases without the wake word are transcribed **locally** and thrown away. Nothing is saved.
-With `STT_BACKEND=hf`, every phrase is sent to Hugging Face, so prefer `local`.
+To spot the wake word, Aibo has to transcribe everything said in the channel.
+With `STT_BACKEND=google` (default) every phrase is sent to Google; with `hf`, to Hugging Face.
+Phrases without the wake word are thrown away and never saved. `STT_BACKEND=local`
+(`pip install faster-whisper`) keeps all audio on the machine.
 Tell your friends Aibo can hear the channel while it's in VC.
 
 ---
@@ -129,8 +134,13 @@ YouTube blocks most datacenter IPs. In order of effort:
 | `HF_CALLS_PER_MIN` | | `20` | Cap on LLM calls per minute |
 | `VOICE_LISTEN` | | `true` | Listen for the wake word in voice chat |
 | `WAKE_WORDS` | | `aibo,ai bo,…` | Spellings that count as the wake word |
-| `STT_BACKEND` | | `local` | `local` (faster-whisper) or `hf` |
-| `STT_LOCAL_MODEL` | | `base` | `tiny` / `base` / `small` |
+| `STT_BACKEND` | | `google` | `google`, `local` (faster-whisper) or `hf` |
+| `STT_LANGUAGE` | | `en-IN` | Google language code (`en-IN`, `en-US`, `ne-NP`) |
+| `STT_LOCAL_MODEL` | | `base` | `tiny` / `base` / `small` (local only) |
+| `TTS_REPLY` | | `true` | Answer spoken requests out loud |
+| `TTS_ENGINE` | | `edge` | `edge` (neural voices) or `gtts` (Google; `pip install gTTS`) |
+| `TTS_VOICE` | | `en-US-BrianNeural` | Edge voice (`edge-tts --list-voices`) |
+| `TTS_VOICE_NE` | | `ne-NP-SagarNeural` | Edge voice for Devanagari Nepali replies |
 | `STT_HF_MODEL` | | `openai/whisper-large-v3-turbo` | Used when `STT_BACKEND=hf` |
 | `YTDLP_COOKIES` | | — | Path to a YouTube cookies.txt |
 | `SOUNDCLOUD_FALLBACK` | | `true` | Use SoundCloud when YouTube refuses |
