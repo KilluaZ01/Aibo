@@ -1,0 +1,13 @@
+# Discord
+discord.py>=2.3.2
+
+# OpenAI LLM
+openai>=1.30.0
+
+# HTTP client (Lavalink REST + WS)
+aiohttp>=3.9.0
+
+# Environment variable loading
+python-dotenv>=1.0.0
+
+PyNaCl
