@@ -4,17 +4,25 @@ music/search.py — YouTube search and stream resolution via yt-dlp.
 Search uses ytsearch1:<query> to find the top YouTube result.
 Stream resolution re-fetches a fresh audio URL immediately before
 playback because YouTube stream URLs expire quickly.
+
+From a datacenter IP (Oracle, Fly…) YouTube often answers
+"Sign in to confirm you're not a bot". Two ways around it:
+- YTDLP_COOKIES: path to a cookies.txt exported from a logged-in
+  (throwaway) YouTube account.
+- SOUNDCLOUD_FALLBACK: when YouTube refuses, search SoundCloud instead.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from typing import Optional
 from urllib.parse import urlparse
 
 import yt_dlp
 
+from config import settings
 from music.queue import Track
 
 log = logging.getLogger("nova.music.search")
@@ -39,6 +47,14 @@ _YDL_STREAM_OPTS = {
 }
 
 
+if settings.ytdlp_cookies:
+    if os.path.isfile(settings.ytdlp_cookies):
+        _YDL_SEARCH_OPTS["cookiefile"] = settings.ytdlp_cookies
+        _YDL_STREAM_OPTS["cookiefile"] = settings.ytdlp_cookies
+    else:
+        log.warning("[Music] YTDLP_COOKIES file not found: %s", settings.ytdlp_cookies)
+
+
 def _is_url(query: str) -> bool:
     try:
         result = urlparse(query)
@@ -47,9 +63,9 @@ def _is_url(query: str) -> bool:
         return False
 
 
-def _search_sync(query: str) -> Optional[dict]:
+def _search_sync(query: str, source: str = "ytsearch1") -> Optional[dict]:
     """Synchronous yt-dlp search — run in thread."""
-    search_query = query if _is_url(query) else f"ytsearch1:{query}"
+    search_query = query if _is_url(query) else f"{source}:{query}"
     with yt_dlp.YoutubeDL(_YDL_SEARCH_OPTS) as ydl:
         info = ydl.extract_info(search_query, download=False)
         if not info:
@@ -78,6 +94,16 @@ def _resolve_stream_sync(webpage_url: str) -> Optional[str]:
         return None
 
 
+async def _search(query: str, source: str) -> Optional[dict]:
+    try:
+        return await asyncio.to_thread(_search_sync, query, source)
+    except yt_dlp.utils.DownloadError as exc:
+        log.error("[Music] yt-dlp %s error: %s", source, exc)
+    except Exception as exc:
+        log.error("[Music] Unexpected search error: %s", exc, exc_info=True)
+    return None
+
+
 async def search_track(
     query: str,
     requester: Optional[str] = None,
@@ -87,14 +113,10 @@ async def search_track(
     Does NOT resolve the stream URL yet — that happens in resolve_stream().
     """
     log.info("[Music] YouTube search: %s", query)
-    try:
-        info = await asyncio.to_thread(_search_sync, query)
-    except yt_dlp.utils.DownloadError as exc:
-        log.error("[Music] yt-dlp search error: %s", exc)
-        return None
-    except Exception as exc:
-        log.error("[Music] Unexpected search error: %s", exc, exc_info=True)
-        return None
+    info = await _search(query, "ytsearch1")
+    if not info and settings.soundcloud_fallback and not _is_url(query):
+        log.info("[Music] Trying SoundCloud for: %s", query)
+        info = await _search(query, "scsearch1")
 
     if not info:
         log.info("[Music] No results for: %s", query)
@@ -124,14 +146,22 @@ async def resolve_stream(track: Track) -> Optional[str]:
     Called right before FFmpeg starts — never cache this URL.
     """
     log.info("[Music] Resolving fresh stream for: %s", track.title)
+    url = None
     try:
         url = await asyncio.to_thread(_resolve_stream_sync, track.webpage_url)
     except yt_dlp.utils.DownloadError as exc:
         log.error("[Music] Stream resolution error: %s", exc)
-        return None
     except Exception as exc:
         log.error("[Music] Unexpected stream error: %s", exc, exc_info=True)
-        return None
+
+    # YouTube search often works from a server while the stream itself is
+    # blocked — find the same song on SoundCloud instead.
+    if not url and settings.soundcloud_fallback and "soundcloud.com" not in track.webpage_url:
+        info = await _search(f"{track.title} {track.artist}", "scsearch1")
+        if info:
+            log.info("[Music] Streaming from SoundCloud instead: %s", info.get("title"))
+            track.webpage_url = info.get("webpage_url") or track.webpage_url
+            url = info.get("url")
 
     if not url:
         log.error("[Music] No stream URL found for: %s", track.webpage_url)
