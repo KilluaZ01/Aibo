@@ -26,4 +26,6 @@ def setup_logging() -> None:
     # Quieten noisy libraries
     logging.getLogger("discord").setLevel(logging.WARNING)
     logging.getLogger("aiohttp").setLevel(logging.WARNING)
-    logging.getLogger("anthropic").setLevel(logging.WARNING)
+    logging.getLogger("huggingface_hub").setLevel(logging.WARNING)
+    logging.getLogger("discord.ext.voice_recv").setLevel(logging.WARNING)
+    logging.getLogger("faster_whisper").setLevel(logging.WARNING)

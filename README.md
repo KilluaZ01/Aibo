@@ -1,8 +1,10 @@
-# Nova — AI Discord Music Companion
+# Aibo — the music friend in your voice chat
 
-An AI-powered Discord bot that understands natural language and controls SoundCloud music through conversation.
+Aibo joins your voice channel, plays music, and listens for its name.
+Say **"Aibo, play K by Cigarettes After Sex"** out loud, or type it. No slash commands.
 
-No slash commands. No `!play`. Just talk to it.
+It reads how you're feeling ("aibo rough day, play something") and answers that first,
+then picks a song that fits.
 
 ---
 
@@ -10,132 +12,110 @@ No slash commands. No `!play`. Just talk to it.
 
 ### 1. Prerequisites
 
-- Python 3.11+
-- Java 17+ (for Lavalink)
-- A Discord application with a bot token
-- An Anthropic API key
+- Python 3.10+ (3.11+ recommended)
+- FFmpeg (`sudo apt install ffmpeg`)
+- git (voice receive installs from GitHub)
+- A Discord bot token with **Message Content Intent** enabled
+- A Hugging Face token (the same one the Nima/Arik/Zidan bots use)
 
-### 2. Clone and install
+### 2. Install
 
 ```bash
-git clone <your-repo-url>
-cd ai-discord-bot
+cd Aibo
 python -m venv .venv
-source .venv/bin/activate   # Windows: .venv\Scripts\activate
+source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 3. Configure environment
+`discord-ext-voice-recv` replaces `discord.py` with a pinned fork that can **hear** voice.
+Install Aibo in its own venv so it doesn't change the discord.py the other bots use.
+
+### 3. Configure
 
 ```bash
 cp .env.example .env
-# Edit .env and fill in your DISCORD_TOKEN and LLM_API_KEY
+# fill in DISCORD_TOKEN and HUGGINGFACE_TOKEN
 ```
 
-### 4. Start Lavalink
-
-Download `Lavalink.jar` from [lavalink.dev](https://github.com/lavalink-devs/Lavalink/releases).
-
-```bash
-mkdir -p lavalink
-# Copy lavalink/application.yml into the same folder
-cd lavalink
-java -jar Lavalink.jar
-```
-
-Wait for: `Lavalink is ready to accept connections.`
-
-### 5. Run the bot
+### 4. Run
 
 ```bash
 python bot.py
 ```
 
----
-
-## Architecture
-
-```
-Discord Message
-      ↓
-Message Router   ← cheap pattern check; ignores noise
-      ↓
-LLM (Claude)     ← understands intent, picks tool
-      ↓
-Tool Call        ← validated Python function
-      ↓
-SoundCloud → Lavalink → Discord Voice
-      ↓
-Tool Result
-      ↓
-LLM              ← writes natural response
-      ↓
-Discord Message
-```
-
-### Key design decisions
-
-| Layer | Responsibility |
-|---|---|
-| `ai/router.py` | Decides if a message should reach the LLM at all |
-| `ai/client.py` | Anthropic API + tool-use loop |
-| `ai/tools.py` | Tool definitions sent to the LLM |
-| `ai/prompts.py` | System prompt + personality |
-| `music/manager.py` | Lavalink WS session + per-guild player registry |
-| `music/player.py` | Per-guild playback state + Lavalink REST calls |
-| `music/soundcloud.py` | SoundCloud search via Lavalink REST |
-| `music/queue.py` | Simple track queue |
-| `discord_bot/events.py` | Discord event wiring |
-| `discord_bot/context.py` | Bounded per-guild conversation history |
+The first start downloads the speech model (~150 MB for `base`).
 
 ---
 
-## Music source
+## Talking to Aibo
 
-**SoundCloud only.**
-
-The pipeline is: `SoundCloud → Lavalink → Discord Voice`
-
-No YouTube, Spotify, Deezer, or other providers. If a SoundCloud search fails, the bot says so.
-
----
-
-## Natural language examples
+**Typed** — mention it, reply to it, say "aibo", or just use a music word:
 
 ```
+aibo join
 play K by Cigarettes After Sex
-bro put some sad shit on
-can we listen to Cigarettes After Sex
-skip this
-next
-I don't wanna hear this
-pause
-hold the music
-resume
-what's playing?
-show me the queue
-put Sweater Weather next
-remove the second song
-clear the queue
-turn it down
-volume 30
-louder
-leave the vc
-disconnect
+aibo i'm so tired, put something on
+something for a rainy night
+skip / pause / resume / volume 30 / what's playing / show the queue
+remove the second song / leave the vc
 ```
+
+**Spoken** — Aibo must be in your voice channel first (`aibo join`, or play anything). Then:
+
+- "Aibo, play Apocalypse" — all in one breath, or
+- "Aibo" … *(the music dips, so you know it heard)* … "play something chill"
+
+The request and the answer show up in the voice channel's text chat
+(or wherever you last typed to Aibo).
 
 ---
 
-## Discord permissions required
+## How it works
 
-- Read Messages / View Channels
-- Send Messages
-- Read Message History
-- Connect (voice)
-- Speak (voice)
-- Use Voice Activity
+```
+Voice chat audio (per person)            Typed message
+      ↓ phrase ends after ~0.7 s silence       ↓
+Speech-to-text (local Whisper)                 │
+      ↓ starts with "Aibo"?                    │
+      └──────────────┬─────────────────────────┘
+                     ↓
+      Fast path (ai/intent.py)   "skip", "volume 30", "play K" → no AI call
+                     ↓ otherwise
+      Hugging Face LLM            reads the mood, picks an action + what to say (JSON)
+                     ↓
+      yt-dlp (YouTube → SoundCloud fallback) → FFmpeg → Discord voice
+```
 
-Enable **Message Content Intent** in the Discord Developer Portal → Bot settings.
+| File | Job |
+|---|---|
+| `voice/listener.py` | Hears each person, splits phrases, catches the wake word, ducks the music |
+| `voice/stt.py` | Speech-to-text: local faster-whisper or Hugging Face Whisper |
+| `ai/intent.py` | Understands clear commands without the LLM |
+| `ai/client.py` | Hugging Face model chain, rate limit, JSON decisions, replies |
+| `ai/prompts.py` | Aibo's personality and rules |
+| `ai/mood.py` | Notices sad / tired / stressed / hyped / chill (English + Nepali) |
+| `ai/router.py` | Decides whether a typed message is for Aibo |
+| `music/search.py` | yt-dlp search, cookies, SoundCloud fallback |
+| `music/player.py` | Per-guild playback, queue, volume, voice connection |
+| `discord_bot/events.py` | Wires typed and spoken requests to the same handler |
+
+### Privacy
+
+Phrases without the wake word are transcribed **locally** and thrown away. Nothing is saved.
+With `STT_BACKEND=hf`, every phrase is sent to Hugging Face, so prefer `local`.
+Tell your friends Aibo can hear the channel while it's in VC.
+
+---
+
+## YouTube on Oracle ("Sign in to confirm you're not a bot")
+
+YouTube blocks most datacenter IPs. In order of effort:
+
+1. **Do nothing.** `SOUNDCLOUD_FALLBACK=true` (default) plays the song from SoundCloud when YouTube refuses.
+2. **Cookies.** Log into a *throwaway* Google account in a browser, export `cookies.txt` for
+   youtube.com (e.g. the "Get cookies.txt LOCALLY" extension), copy it to the server, and set
+   `YTDLP_COOKIES=/path/to/cookies.txt`. Don't use your main account; it can get flagged.
+3. **Keep yt-dlp fresh.** `pip install -U yt-dlp`. YouTube changes often and old versions break.
 
 ---
 
@@ -144,89 +124,22 @@ Enable **Message Content Intent** in the Discord Developer Portal → Bot settin
 | Variable | Required | Default | Description |
 |---|---|---|---|
 | `DISCORD_TOKEN` | ✅ | — | Discord bot token |
-| `LLM_API_KEY` | ✅ | — | Anthropic API key |
-| `LLM_MODEL` | | `claude-sonnet-4-6` | Anthropic model |
-| `LAVALINK_HOST` | | `127.0.0.1` | Lavalink server host |
-| `LAVALINK_PORT` | | `2333` | Lavalink server port |
-| `LAVALINK_PASSWORD` | | `youshallnotpass` | Lavalink password |
-| `LAVALINK_SECURE` | | `false` | Use WSS/HTTPS |
-| `BOT_NAME` | | `Nova` | Bot personality name |
+| `HUGGINGFACE_TOKEN` | ✅ | — | Hugging Face token |
+| `HF_MODELS` | | Llama 3.1 8B, Qwen 2.5 7B, Mistral 7B | Models tried in order |
+| `HF_CALLS_PER_MIN` | | `20` | Cap on LLM calls per minute |
+| `VOICE_LISTEN` | | `true` | Listen for the wake word in voice chat |
+| `WAKE_WORDS` | | `aibo,ai bo,…` | Spellings that count as the wake word |
+| `STT_BACKEND` | | `local` | `local` (faster-whisper) or `hf` |
+| `STT_LOCAL_MODEL` | | `base` | `tiny` / `base` / `small` |
+| `STT_HF_MODEL` | | `openai/whisper-large-v3-turbo` | Used when `STT_BACKEND=hf` |
+| `YTDLP_COOKIES` | | — | Path to a YouTube cookies.txt |
+| `SOUNDCLOUD_FALLBACK` | | `true` | Use SoundCloud when YouTube refuses |
+| `SONG_COMMENTS` | | `true` | Say something when the queue moves on (max once per 20 min) |
+| `BOT_NAME` | | `Aibo` | Name and wake word |
 | `MAX_CONTEXT_MESSAGES` | | `12` | Conversation window per guild |
 | `LOG_LEVEL` | | `INFO` | `DEBUG / INFO / WARNING / ERROR` |
 
----
+## Discord permissions
 
-## Test checklist
-
-After setup, verify these work naturally:
-
-- [ ] `play K by Cigarettes After Sex`
-- [ ] `play Apocalypse by Cigarettes After Sex`
-- [ ] `put Sweater Weather next`
-- [ ] `skip`
-- [ ] `skip this`
-- [ ] `pause`
-- [ ] `resume`
-- [ ] `what's playing?`
-- [ ] `show me the queue`
-- [ ] `remove the second song`
-- [ ] `clear the queue`
-- [ ] `turn the volume down`
-- [ ] `leave the vc`
-- [ ] `bro put K on`
-- [ ] `can we listen to cigarettes after sex`
-- [ ] `I'm feeling sad, play something`
-- [ ] `put something chill on`
-- [ ] `nah skip this one`
-- [ ] `what did you just play?`
-
----
-
-## Project structure
-
-```
-ai-discord-bot/
-│
-├── bot.py                  ← entrypoint
-├── config.py               ← environment configuration
-├── requirements.txt
-├── .env.example
-├── .gitignore
-├── README.md
-│
-├── ai/
-│   ├── client.py           ← Anthropic API + tool-use loop
-│   ├── prompts.py          ← system prompt + personality
-│   ├── router.py           ← message routing (should we call the LLM?)
-│   └── tools.py            ← tool definitions for the LLM
-│
-├── music/
-│   ├── manager.py          ← Lavalink WS + guild player registry
-│   ├── player.py           ← per-guild music player
-│   ├── queue.py            ← track queue
-│   └── soundcloud.py       ← SoundCloud search via Lavalink
-│
-├── discord_bot/
-│   ├── events.py           ← Discord event handlers
-│   └── context.py          ← per-guild conversation history
-│
-├── utils/
-│   └── logging.py          ← structured logging setup
-│
-└── lavalink/
-    └── application.yml     ← Lavalink config (SoundCloud only)
-```
-
----
-
-## Development stages
-
-Build and verify in order:
-
-1. **Stage 1** — Discord login, env vars, basic message receiving
-2. **Stage 2** — Lavalink + SoundCloud playback (verify before adding AI)
-3. **Stage 3** — Music tools (test independently)
-4. **Stage 4** — LLM tool-calling integration
-5. **Stage 5** — Natural conversation
-6. **Stage 6** — Conversation context
-7. **Stage 7** — Intent routing + cost control
+View Channels, Send Messages, Read Message History, Connect, Speak, Use Voice Activity.
+Enable **Message Content Intent** in the Developer Portal → Bot.

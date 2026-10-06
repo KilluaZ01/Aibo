@@ -1,13 +1,20 @@
-# Discord
-discord.py>=2.3.2
+# Discord + voice receive.
+# discord-ext-voice-recv (zacker150 fork) pulls in a pinned discord.py fork
+# that speaks Discord's end-to-end encrypted voice (DAVE) and can hear users.
+# Without it Aibo still plays music and takes typed requests.
+discord-ext-voice-recv @ git+https://github.com/zacker150/discord-ext-voice-recv
+PyNaCl
 
-# OpenAI LLM
-openai>=1.30.0
+# AI — same Hugging Face token as the Nima/Arik/Zidan bots
+huggingface_hub>=0.25.0
 
-# HTTP client (Lavalink REST + WS)
-aiohttp>=3.9.0
+# Music
+yt-dlp>=2025.1.1
+
+# Speech-to-text for the wake word (local, free). Drop it and set
+# STT_BACKEND=hf to use Hugging Face Whisper instead.
+faster-whisper>=1.0.0
+numpy
 
 # Environment variable loading
 python-dotenv>=1.0.0
-
-PyNaCl

@@ -18,9 +18,16 @@ log = logging.getLogger("nova.music.manager")
 
 
 class MusicManager:
-    def __init__(self, bot: discord.Client) -> None:
+    def __init__(self, bot: discord.Client, listener_factory=None, on_track_start=None) -> None:
         self._bot = bot
         self._players: dict[int, GuildPlayer] = {}
+        self._listener_factory = listener_factory
+        self._on_track_start = on_track_start
+
+    def set_hooks(self, listener_factory=None, on_track_start=None) -> None:
+        """Voice listener + song-change hooks; used by players created after this."""
+        self._listener_factory = listener_factory
+        self._on_track_start = on_track_start
 
     async def start(self) -> None:
         """No-op — no Lavalink connection needed."""
@@ -36,7 +43,12 @@ class MusicManager:
 
     def get_or_create_player(self, guild: discord.Guild) -> GuildPlayer:
         if guild.id not in self._players:
-            player = GuildPlayer(guild, self._bot)
+            player = GuildPlayer(
+                guild,
+                self._bot,
+                listener_factory=self._listener_factory,
+                on_track_start=self._on_track_start,
+            )
             self._players[guild.id] = player
             log.info(
                 "[Music] Created player for guild %d (%s)",
@@ -104,6 +116,9 @@ class MusicManager:
             except (TypeError, ValueError):
                 return {"success": False, "error": "invalid_volume"}
             return await player.set_volume(level)
+
+        elif tool_name == "join_voice":
+            return await player.join_voice(voice_channel)
 
         elif tool_name == "leave_voice":
             return await player.leave_voice()

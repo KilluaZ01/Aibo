@@ -25,8 +25,12 @@ from typing import Optional
 
 import discord
 
+from config import settings
 from music.queue import GuildQueue, Track
 from music.search import search_track, resolve_stream
+from voice.listener import VOICE_RECV_AVAILABLE, voice_recv
+
+DUCK_FACTOR = 0.25  # music volume multiplier while someone is talking to Aibo
 
 log = logging.getLogger("nova.music.player")
 
@@ -45,9 +49,16 @@ class GuildPlayer:
         self,
         guild: discord.Guild,
         bot: discord.Client,
+        listener_factory=None,
+        on_track_start=None,
     ) -> None:
         self.guild = guild
         self._bot = bot
+        # listener_factory(player) -> VoiceListener; on_track_start(player, track) is awaited
+        self._listener_factory = listener_factory
+        self._on_track_start = on_track_start
+        self._listener = None
+        self._ducked = False
 
         self.queue = GuildQueue()
         self.current_track: Optional[Track] = None
@@ -67,12 +78,26 @@ class GuildPlayer:
                     await self._voice_client.move_to(channel)
                 return True
 
-            self._voice_client = await channel.connect(self_deaf=True)
+            if settings.voice_listen and VOICE_RECV_AVAILABLE:
+                # Not deafened: Aibo has to hear the channel to catch its wake word.
+                self._voice_client = await channel.connect(
+                    cls=voice_recv.VoiceRecvClient, self_deaf=False
+                )
+            else:
+                self._voice_client = await channel.connect(self_deaf=True)
             log.info(
                 "[Music] Connected to voice channel '%s' in guild %d",
                 channel.name,
                 self.guild.id,
             )
+            if self._listener_factory and settings.voice_listen:
+                self._listener = self._listener_factory(self)
+                if not self._listener.attach(self._voice_client):
+                    log.warning(
+                        "[Voice] Voice receive unavailable — install the "
+                        "discord-ext-voice-recv fork (see README). Text commands still work."
+                    )
+                    self._listener = None
             return True
 
         except discord.DiscordException as exc:
@@ -80,9 +105,31 @@ class GuildPlayer:
             return False
 
     async def _disconnect_voice(self) -> None:
+        if self._listener:
+            self._listener.detach(self._voice_client)
+            self._listener = None
         if self._voice_client and self._voice_client.is_connected():
             await self._voice_client.disconnect()
         self._voice_client = None
+
+    @property
+    def voice_channel(self):
+        if self._voice_client and self._voice_client.is_connected():
+            return self._voice_client.channel
+        return None
+
+    def duck(self, on: bool) -> None:
+        """Lower the music while someone is talking to Aibo, restore after."""
+        self._ducked = on
+        self._apply_volume()
+
+    def _apply_volume(self) -> None:
+        if (
+            self._voice_client
+            and isinstance(self._voice_client.source, discord.PCMVolumeTransformer)
+        ):
+            factor = DUCK_FACTOR if self._ducked else 1.0
+            self._voice_client.source.volume = self._volume * factor
 
     @property
     def voice_channel_id(self) -> Optional[int]:
@@ -105,7 +152,8 @@ class GuildPlayer:
 
         try:
             source = discord.FFmpegPCMAudio(stream_url, **FFMPEG_OPTIONS)
-            source = discord.PCMVolumeTransformer(source, volume=self._volume)
+            factor = DUCK_FACTOR if self._ducked else 1.0
+            source = discord.PCMVolumeTransformer(source, volume=self._volume * factor)
         except Exception as exc:
             log.error("[Music] FFmpeg error: %s", exc)
             return {"success": False, "error": "ffmpeg_error"}
@@ -142,7 +190,12 @@ class GuildPlayer:
         next_track = self.queue.pop_next()
         if next_track:
             log.info("[Music] Auto-playing next: %s", next_track.title)
-            await self._play_track(next_track)
+            result = await self._play_track(next_track)
+            if result.get("success") and self._on_track_start:
+                try:
+                    await self._on_track_start(self, next_track)
+                except Exception:
+                    log.error("[Music] on_track_start hook failed", exc_info=True)
         else:
             log.info("[Music] Queue empty — playback finished")
 
@@ -270,7 +323,16 @@ class GuildPlayer:
             "length": len(self.queue),
         }
 
+    async def join_voice(self, voice_channel: Optional[discord.VoiceChannel]) -> dict:
+        if not voice_channel:
+            return {"success": False, "error": "not_in_voice"}
+        if not await self.ensure_voice(voice_channel):
+            return {"success": False, "error": "voice_connect_failed"}
+        return {"success": True, "listening": self._listener is not None}
+
     def remove_from_queue(self, index: int) -> dict:
+        if index == -1:  # "the last one"
+            index = len(self.queue)
         track = self.queue.remove(index)
         if not track:
             return {"success": False, "error": "invalid_index", "index": index}
@@ -287,13 +349,7 @@ class GuildPlayer:
         level = max(0, min(100, level))
         self._volume = level / 100.0
 
-        if (
-            self._voice_client
-            and self._voice_client.source
-            and isinstance(self._voice_client.source, discord.PCMVolumeTransformer)
-        ):
-            self._voice_client.source.volume = self._volume
-
+        self._apply_volume()
         return {"success": True, "volume": level}
 
     async def leave_voice(self) -> dict:

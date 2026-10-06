@@ -7,8 +7,9 @@ Only messages that pass the filter reach the (expensive) AI call.
 Rules (any match → process):
 1. Bot is directly @mentioned.
 2. Message is a reply to the bot's own message.
-3. Message contains a strong music intent keyword.
-4. Message is in an active conversation thread with the bot
+3. Message says the bot's name.
+4. Message contains a strong music intent keyword.
+5. Message is in an active conversation thread with the bot
    (i.e. bot has spoken recently in this channel).
 """
 
@@ -20,6 +21,8 @@ from collections import defaultdict
 from datetime import datetime, timedelta
 
 import discord
+
+from config import settings
 
 log = logging.getLogger("nova.ai.router")
 
@@ -73,12 +76,17 @@ def should_process(message: discord.Message, bot_user: discord.ClientUser) -> bo
             log.debug("Router: reply to bot — processing")
             return True
 
-    # 3. Strong music intent
+    # 3. Called by name ("aibo play something")
+    if re.search(rf"\b{re.escape(settings.bot_name)}\b", message.content, re.I):
+        log.debug("Router: called by name — processing")
+        return True
+
+    # 4. Strong music intent
     if _MUSIC_PATTERNS.search(message.content):
         log.debug("Router: music intent — processing")
         return True
 
-    # 4. Active conversation window
+    # 5. Active conversation window
     last = _bot_last_spoke.get(message.channel.id, datetime.min)
     if datetime.utcnow() - last < _ACTIVE_WINDOW:
         log.debug("Router: active conversation window — processing")
