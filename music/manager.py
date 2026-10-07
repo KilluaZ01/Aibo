@@ -76,6 +76,12 @@ class MusicManager:
                 return {"success": False, "error": "empty_query"}
             return await player.play_song(query, requester, voice_channel)
 
+        elif tool_name == "play_now":
+            query = str(tool_input.get("query", "")).strip()
+            if not query:
+                return {"success": False, "error": "empty_query"}
+            return await player.play_now(query, requester, voice_channel)
+
         elif tool_name == "queue_song":
             query = str(tool_input.get("query", "")).strip()
             if not query:

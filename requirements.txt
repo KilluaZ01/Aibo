@@ -11,10 +11,14 @@ huggingface_hub>=0.25.0
 # Music
 yt-dlp>=2025.1.1
 
-# Speech-to-text for the wake word (local, free). Drop it and set
-# STT_BACKEND=hf to use Hugging Face Whisper instead.
-faster-whisper>=1.0.0
+# Speech-to-text (STT_BACKEND=google, default) and talking back (TTS_ENGINE)
+SpeechRecognition>=3.10.0
+edge-tts>=6.1.0
+# gTTS>=2.5.0   # only for TTS_ENGINE=gtts (pins an old click that clashes with huggingface_hub)
 numpy
+
+# Only for STT_BACKEND=local (offline Whisper on the CPU):
+# faster-whisper>=1.0.0
 
 # Environment variable loading
 python-dotenv>=1.0.0

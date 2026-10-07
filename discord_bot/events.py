@@ -7,6 +7,7 @@ handle_request(), so "aibo play K" works the same either way.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timedelta
 from typing import Optional
@@ -49,12 +50,31 @@ def register_events(
         await channel.send(text[:1900], allowed_mentions=discord.AllowedMentions.none())
         record_bot_spoke(channel.id)
 
+    # One request at a time per guild, in the order they were said: otherwise a
+    # slow "play X" can finish after a quick "stop" and start the music again.
+    guild_locks: dict[int, asyncio.Lock] = {}
+
     async def handle_request(
         guild: discord.Guild,
         author: discord.Member,
         text: str,
         channel,
         spoken: bool,
+        guesses: Optional[list[str]] = None,
+        named: bool = False,
+    ) -> None:
+        lock = guild_locks.setdefault(guild.id, asyncio.Lock())
+        async with lock:
+            await _handle_request(guild, author, text, channel, spoken, guesses, named)
+
+    async def _handle_request(
+        guild: discord.Guild,
+        author: discord.Member,
+        text: str,
+        channel,
+        spoken: bool,
+        guesses: Optional[list[str]] = None,
+        named: bool = False,
     ) -> None:
         voice_channel: Optional[discord.VoiceChannel] = None
         if isinstance(author, discord.Member) and author.voice:
@@ -76,6 +96,17 @@ def register_events(
         player = music_manager.get_player(guild.id)
         music_state = player.state_snapshot() if player else None
 
+        announced: list[str] = []
+
+        async def announce(line: str) -> None:
+            """Spoken requests: say the reply while the song is still loading."""
+            # Mark it said up front: the final reply is ready before the voice
+            # line finishes generating, and must not say it a second time.
+            announced.append(line)
+            p = music_manager.get_player(guild.id)
+            if not (p and await p.speak(line)):
+                announced.remove(line)
+
         try:
             response = await process_message(
                 conversation=context.get(guild.id),
@@ -83,6 +114,12 @@ def register_events(
                 music_state=music_state,
                 mood_note=moods.describe(guild.id),
                 tool_executor=tool_executor,
+                guesses=guesses,
+                announce=announce if spoken else None,
+                # Spoken: only touch the music when they used a clear command
+                # word ("Milo play…", "Milo volume…"). Even after the name, a
+                # stray word ("Milo… my") must not become a song.
+                require_command_words=spoken,
             )
         except Exception as exc:
             log.error("LLM processing error: %s", exc, exc_info=True)
@@ -90,6 +127,13 @@ def register_events(
 
         if response:
             context.add_assistant(guild.id, response)
+            # Asked out loud → answer out loud too (the text stays as a record),
+            # unless that line was already said while the song loaded.
+            already_said = any(line in response for line in announced)
+            if spoken and not already_said:
+                player = music_manager.get_player(guild.id)
+                if player:
+                    await player.speak(response)
             if spoken:
                 response = f"🎙️ *{author.display_name}: \"{text}\"*\n{response}"
             await send(channel, response)
@@ -97,9 +141,13 @@ def register_events(
     def make_listener(player) -> VoiceListener:
         guild = player.guild
 
-        async def on_voice_command(member: discord.Member, text: str) -> None:
+        async def on_voice_command(
+            member: discord.Member, text: str, guesses: list[str], named: bool
+        ) -> None:
             channel = reply_channel_for(guild, fallback=player.voice_channel)
-            await handle_request(guild, member, text, channel, spoken=True)
+            await handle_request(
+                guild, member, text, channel, spoken=True, guesses=guesses, named=named
+            )
 
         return VoiceListener(on_command=on_voice_command, duck=player.duck)
 

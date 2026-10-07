@@ -21,16 +21,20 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from typing import Optional
 
 import discord
 
 from config import settings
+from music.mixer import MixedSource
 from music.queue import GuildQueue, Track
 from music.search import search_track, resolve_stream
 from voice.listener import VOICE_RECV_AVAILABLE, voice_recv
+from voice import tts
 
-DUCK_FACTOR = 0.25  # music volume multiplier while someone is talking to Aibo
+VOICE_WAIT = 4.0  # max seconds a new song waits for Milo to finish talking
+DUCK_FACTOR = 0.15  # music volume multiplier while someone is talking (keeps it out of mics)
 
 log = logging.getLogger("nova.music.player")
 
@@ -63,8 +67,10 @@ class GuildPlayer:
         self.queue = GuildQueue()
         self.current_track: Optional[Track] = None
         self._voice_client: Optional[discord.VoiceClient] = None
-        self._volume: float = 0.8  # 0.0 – 1.0
+        self._volume: float = 0.5  # 0.0 – 1.0 (lower = less music leaking into mics)
         self._paused: bool = False
+        self._music: Optional[discord.PCMVolumeTransformer] = None
+        self._mixer: Optional[MixedSource] = None
 
     # ------------------------------------------------------------------
     # Voice connection
@@ -124,12 +130,44 @@ class GuildPlayer:
         self._apply_volume()
 
     def _apply_volume(self) -> None:
-        if (
-            self._voice_client
-            and isinstance(self._voice_client.source, discord.PCMVolumeTransformer)
-        ):
+        if self._music:
             factor = DUCK_FACTOR if self._ducked else 1.0
-            self._voice_client.source.volume = self._volume * factor
+            self._music.volume = self._volume * factor
+
+    def _stop_audio(self) -> None:
+        """Stop what's playing but keep listening.
+
+        VoiceRecvClient.stop() also stops *receiving* audio, which would make
+        Milo deaf after the first skip — use stop_playing() when it exists.
+        """
+        vc = self._voice_client
+        if vc:
+            getattr(vc, "stop_playing", vc.stop)()
+
+    def _music_active(self) -> bool:
+        """A song is loaded (playing or paused) — Aibo talking doesn't count."""
+        return self.current_track is not None and self._mixer is not None
+
+    async def speak(self, text: str) -> bool:
+        """Say something in the voice channel, over the music if a song is on."""
+        vc = self._voice_client
+        if not settings.tts_reply or not vc or not vc.is_connected():
+            return False
+        line = tts.speakable(text)
+        path = await tts.synthesize(line)
+        if not path:
+            return False
+        source = _SpeechSource(path)
+        if self._music_active() and not self._paused and vc.source is self._mixer:
+            self._mixer.say(source)
+        elif not vc.is_playing() and not vc.is_paused():
+            vc.play(source)
+        else:
+            # Song is paused — talking would unpause the player; stay quiet.
+            source.cleanup()
+            return False
+        log.info("[Voice] Saying: %s", line)
+        return True
 
     @property
     def voice_channel_id(self) -> Optional[int]:
@@ -153,7 +191,8 @@ class GuildPlayer:
         try:
             source = discord.FFmpegPCMAudio(stream_url, **FFMPEG_OPTIONS)
             factor = DUCK_FACTOR if self._ducked else 1.0
-            source = discord.PCMVolumeTransformer(source, volume=self._volume * factor)
+            music = discord.PCMVolumeTransformer(source, volume=self._volume * factor)
+            mixer = MixedSource(music)
         except Exception as exc:
             log.error("[Music] FFmpeg error: %s", exc)
             return {"success": False, "error": "ffmpeg_error"}
@@ -167,7 +206,17 @@ class GuildPlayer:
                 self._bot.loop,
             )
 
-        self._voice_client.play(source, after=after_playing)
+        if self._voice_client.is_playing() or self._voice_client.is_paused():
+            # Only Milo's voice can be on here (songs go through the queue).
+            # He usually announces the song while it's being found; let him
+            # finish the sentence, then start the song.
+            for _ in range(int(VOICE_WAIT / 0.1)):
+                if not self._voice_client.is_playing():
+                    break
+                await asyncio.sleep(0.1)
+            self._stop_audio()
+        self._music, self._mixer = music, mixer
+        self._voice_client.play(mixer, after=after_playing)
         self.current_track = track
         self._paused = False
 
@@ -186,6 +235,7 @@ class GuildPlayer:
         """Called when a track finishes. Plays next in queue if available."""
         self.current_track = None
         self._paused = False
+        self._music = self._mixer = None
 
         next_track = self.queue.pop_next()
         if next_track:
@@ -220,8 +270,8 @@ class GuildPlayer:
         if not track:
             return {"success": False, "error": "no_results", "query": query}
 
-        # If already playing, queue it
-        if self._voice_client.is_playing() and not self._paused:
+        # If a song is on, queue it
+        if self._music_active():
             pos = self.queue.add(track)
             return {
                 "success": True,
@@ -251,8 +301,8 @@ class GuildPlayer:
         if not track:
             return {"success": False, "error": "no_results", "query": query}
 
-        # If nothing playing, start immediately
-        if not self._voice_client.is_playing():
+        # If no song is on, start immediately
+        if not self._music_active():
             return await self._play_track(track)
 
         pos = self.queue.add(track)
@@ -265,12 +315,34 @@ class GuildPlayer:
             "queue_position": pos,
         }
 
+    async def play_now(
+        self,
+        query: str,
+        requester: Optional[str] = None,
+        voice_channel: Optional[discord.VoiceChannel] = None,
+    ) -> dict:
+        """Replace whatever is on with this song ("wrong song, I said X")."""
+        if not self._music_active():
+            return await self.play_song(query, requester, voice_channel)
+        track = await search_track(query, requester)
+        if not track:
+            return {"success": False, "error": "no_results", "query": query}
+        self.queue.add_front(track)
+        self._stop_audio()  # after_playing → _on_track_end plays the front track
+        return {
+            "success": True,
+            "action": "playing",
+            "title": track.title,
+            "artist": track.artist,
+            "duration": track.duration_ms,
+        }
+
     async def skip_song(self) -> dict:
-        if not self._voice_client or not self._voice_client.is_playing():
+        if not self._voice_client or not self._music_active():
             return {"success": False, "error": "nothing_playing"}
 
         skipped = self.current_track
-        self._voice_client.stop()  # triggers after_playing → _on_track_end
+        self._stop_audio()  # triggers after_playing → _on_track_end
 
         return {
             "success": True,
@@ -282,7 +354,7 @@ class GuildPlayer:
         }
 
     async def pause_music(self) -> dict:
-        if not self._voice_client or not self._voice_client.is_playing():
+        if not self._voice_client or not self._music_active() or self._paused:
             return {"success": False, "error": "nothing_playing"}
         self._voice_client.pause()
         self._paused = True
@@ -299,8 +371,10 @@ class GuildPlayer:
         self.queue.clear()
         self.current_track = None
         self._paused = False
-        if self._voice_client and self._voice_client.is_playing():
-            self._voice_client.stop()
+        if self._voice_client and (
+            self._voice_client.is_playing() or self._voice_client.is_paused()
+        ):
+            self._stop_audio()
         return {"success": True}
 
     def now_playing(self) -> dict:
@@ -378,3 +452,18 @@ class GuildPlayer:
         snap["queue"] = self.queue.as_list()
         snap["volume"] = int(self._volume * 100)
         return snap
+
+
+class _SpeechSource(discord.FFmpegPCMAudio):
+    """An mp3 from voice/tts.py that deletes itself when done."""
+
+    def __init__(self, path: str) -> None:
+        super().__init__(path)
+        self._path = path
+
+    def cleanup(self) -> None:
+        super().cleanup()
+        try:
+            os.remove(self._path)
+        except OSError:
+            pass

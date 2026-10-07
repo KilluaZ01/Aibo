@@ -1,11 +1,13 @@
 """
 voice/stt.py — speech-to-text for voice commands.
 
-Two backends:
-- "local" (default): faster-whisper on the CPU. Free, nothing leaves the
-  machine, and it can afford to hear every phrase to spot the wake word.
-- "hf": Hugging Face Whisper with the same HUGGINGFACE_TOKEN. More accurate
-  on song names but every phrase spends inference credits.
+Backends (STT_BACKEND):
+- "google" (default): Google's free web speech API via SpeechRecognition.
+  No key, fast, good with Indian/Nepali-accented English. Every phrase
+  spoken in the channel is sent to Google (that's how it spots the wake word),
+  and Google rate-limits the free endpoint if it's hammered.
+- "local": faster-whisper on the CPU. Free, nothing leaves the machine.
+- "hf": Hugging Face Whisper with HUGGINGFACE_TOKEN. Spends inference credits.
 
 Audio in is 16 kHz mono float32 (see voice/listener.py).
 """
@@ -24,6 +26,7 @@ from config import settings
 log = logging.getLogger("nova.voice.stt")
 
 SAMPLE_RATE = 16000
+GOOGLE_TIMEOUT = 6  # seconds
 
 # Nudges Whisper towards spelling the wake word and common requests right.
 _PROMPT = f"{settings.bot_name}, play a song. {settings.bot_name}, skip. {settings.bot_name}, pause."
@@ -61,8 +64,32 @@ def _transcribe_local(audio: np.ndarray) -> str:
     return " ".join(s.text for s in segments).strip()
 
 
+def _to_pcm16(audio: np.ndarray) -> bytes:
+    return (np.clip(audio, -1.0, 1.0) * 32767).astype(np.int16).tobytes()
+
+
+def _transcribe_google(audio: np.ndarray) -> list[str]:
+    """Google's guesses, best first."""
+    import speech_recognition as sr
+
+    data = sr.AudioData(_to_pcm16(audio), SAMPLE_RATE, 2)
+    recognizer = sr.Recognizer()
+    # Without this a slow Google reply blocks every phrase after it.
+    recognizer.operation_timeout = GOOGLE_TIMEOUT
+    try:
+        result = recognizer.recognize_google(
+            data, language=settings.stt_language, show_all=True
+        )
+    except sr.UnknownValueError:  # no words in it
+        return []
+    if not isinstance(result, dict):
+        return []
+    guesses = [a.get("transcript", "").strip() for a in result.get("alternative", [])]
+    return [g for g in guesses if g]
+
+
 def _to_wav(audio: np.ndarray) -> bytes:
-    pcm = (np.clip(audio, -1.0, 1.0) * 32767).astype(np.int16).tobytes()
+    pcm = _to_pcm16(audio)
     buf = io.BytesIO()
     with wave.open(buf, "wb") as w:
         w.setnchannels(1)
@@ -86,13 +113,17 @@ async def warm_up() -> None:
         await asyncio.to_thread(_load_local)
 
 
-async def transcribe(audio: np.ndarray) -> str:
+async def transcribe_all(audio: np.ndarray) -> list[str]:
+    """Every guess the backend offers, best first ([] when nothing was said)."""
     try:
+        if _backend == "google":
+            return await asyncio.to_thread(_transcribe_google, audio)
         if _backend == "local":
             text = await asyncio.to_thread(_transcribe_local, audio)
             if _backend == "local":
-                return text
-        return await _transcribe_hf(audio)
+                return [text] if text else []
+        text = await _transcribe_hf(audio)
+        return [text] if text else []
     except Exception as exc:
         log.warning("[STT] Transcription failed: %s", str(exc)[:200])
-        return ""
+        return []

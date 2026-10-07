@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 from typing import Optional
 from urllib.parse import urlparse
 
@@ -53,6 +54,9 @@ if settings.ytdlp_cookies:
         _YDL_STREAM_OPTS["cookiefile"] = settings.ytdlp_cookies
     else:
         log.warning("[Music] YTDLP_COOKIES file not found: %s", settings.ytdlp_cookies)
+
+
+STREAM_URL_FRESH = 30 * 60  # seconds
 
 
 def _is_url(query: str) -> bool:
@@ -134,6 +138,8 @@ async def search_track(
         webpage_url=webpage_url,
         duration_ms=duration_ms,
         requester=requester,
+        stream_url=info.get("url"),
+        stream_fetched_at=time.monotonic(),
     )
 
     log.info("[Music] Resolved: %s — %s", track.title, track.artist)
@@ -145,6 +151,12 @@ async def resolve_stream(track: Track) -> Optional[str]:
     Re-fetch a fresh direct audio stream URL immediately before playback.
     Called right before FFmpeg starts — never cache this URL.
     """
+    # The search just fetched a playable URL; YouTube URLs last hours, but a
+    # queued song may wait a while, so only trust it when it's recent.
+    if track.stream_url and time.monotonic() - track.stream_fetched_at < STREAM_URL_FRESH:
+        log.info("[Music] Using stream URL from the search for: %s", track.title)
+        return track.stream_url
+
     log.info("[Music] Resolving fresh stream for: %s", track.title)
     url = None
     try:

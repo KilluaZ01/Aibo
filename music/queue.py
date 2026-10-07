@@ -16,6 +16,10 @@ class Track:
     webpage_url: str  # always the YouTube watch URL — used for stream re-resolution
     duration_ms: int
     requester: Optional[str] = None
+    # Direct audio URL from the search itself, and when we got it (time.monotonic()).
+    # Saves a second slow yt-dlp extraction when the song plays right away.
+    stream_url: Optional[str] = None
+    stream_fetched_at: float = 0.0
 
     def as_dict(self) -> dict:
         return {
@@ -38,6 +42,9 @@ class GuildQueue:
     def add(self, track: Track) -> int:
         self._tracks.append(track)
         return len(self._tracks)
+
+    def add_front(self, track: Track) -> None:
+        self._tracks.insert(0, track)
 
     def pop_next(self) -> Optional[Track]:
         return self._tracks.pop(0) if self._tracks else None
