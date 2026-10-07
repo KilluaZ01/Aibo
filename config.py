@@ -30,7 +30,8 @@ def _default_wake_words() -> str:
     name = _optional("BOT_NAME", "Milo").strip().lower()
     known = {
         "milo": "milo,mylo,meelo,mailo,milo's,my lo,mi lo,nilo,my love,main love,"
-                "mile,my low,me low,mellow,melo,mello,below,willow,my loan,my lord,miller,mela",
+                "mile,my low,me low,mellow,melo,mello,below,willow,my loan,my lord,miller,mela,"
+                "mill lo,mill love,mill low,mi love,mi low",
         "ai": "ai,a i,a.i,aye i",
         "aibo": "aibo,ai bo,aibou,aybo,eibo,ibo,i bo,eye bo,hi bo,haibo,"
                 "i bow,eye bow,hi bow,ai bow,aibu,eibu,ivo,ebo,ai boo,i boo",
@@ -43,8 +44,11 @@ class Config:
     # Discord
     discord_token: str
 
-    # LLM — Hugging Face Inference, same token as the Nima/Arik/Zidan bots.
+    # LLM — NVIDIA's API first (free tier, fast), Hugging Face as a fallback.
     # Models are tried in order until one answers.
+    nvidia_api_key: str
+    nvidia_base_url: str
+    nvidia_models: tuple[str, ...]
     hf_token: str
     hf_models: tuple[str, ...]
     hf_intent_models: tuple[str, ...]   # bigger models for understanding requests
@@ -84,7 +88,19 @@ class Config:
     def from_env(cls) -> "Config":
         return cls(
             discord_token=_require("DISCORD_TOKEN"),
-            hf_token=_require("HUGGINGFACE_TOKEN"),
+            nvidia_api_key=_optional("NVIDIA_API_KEY", ""),
+            nvidia_base_url=_optional("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1"),
+            # Super 120B answers in under a second; Ultra 550B is the backup
+            # (often "overloaded"). Thinking is switched off for speed.
+            nvidia_models=tuple(
+                m.strip()
+                for m in _optional(
+                    "NVIDIA_MODELS",
+                    "nvidia/nemotron-3-super-120b-a12b,nvidia/nemotron-3-ultra-550b-a55b",
+                ).split(",")
+                if m.strip()
+            ),
+            hf_token=_optional("HUGGINGFACE_TOKEN", ""),
             # Llama 3.1 8B: the model the Nima/Arik/Zidan bots actually get answers
             # from. (Mistral-7B and Zephyr are "not a chat model" on HF's router.)
             hf_models=tuple(
@@ -106,7 +122,7 @@ class Config:
             bot_name=_optional("BOT_NAME", "Milo"),
             log_level=_optional("LOG_LEVEL", "INFO"),
             max_context_messages=int(_optional("MAX_CONTEXT_MESSAGES", "12")),
-            song_comments=_flag("SONG_COMMENTS", "true"),
+            song_comments=_flag("SONG_COMMENTS", "false"),
             voice_listen=_flag("VOICE_LISTEN", "true"),
             wake_words=tuple(
                 w.strip().lower()
@@ -133,3 +149,6 @@ class Config:
 
 # Singleton — imported everywhere
 settings = Config.from_env()
+
+if not settings.nvidia_api_key and not settings.hf_token:
+    raise EnvironmentError("Set NVIDIA_API_KEY (recommended) or HUGGINGFACE_TOKEN for the AI.")

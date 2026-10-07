@@ -1,10 +1,10 @@
 """
-ai/client.py — Aibo's brain on Hugging Face Inference.
+ai/client.py — Milo's brain.
 
-Uses the same HUGGINGFACE_TOKEN and model fallback chain as the
-Nima/Arik/Zidan bots. Small HF models don't do native tool calling
-reliably, so the model answers with one JSON object that names a music
-action plus what to say; clear commands skip the LLM entirely (ai/intent.py).
+NVIDIA's OpenAI-compatible API first (NVIDIA_API_KEY), Hugging Face
+Inference as a fallback (HUGGINGFACE_TOKEN). The model answers with one
+JSON object that names a music action plus what to say; clear commands
+skip the LLM entirely (ai/intent.py).
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ import time
 from datetime import datetime, timedelta
 from typing import Any, Awaitable, Callable
 
+import aiohttp
 from huggingface_hub import AsyncInferenceClient
 
 from config import settings
@@ -34,7 +35,33 @@ log = logging.getLogger("nova.ai.client")
 # Without a timeout one stuck provider hangs that request forever; on timeout
 # the next model in the chain gets a turn.
 LLM_TIMEOUT = 15  # seconds
-_client = AsyncInferenceClient(token=settings.hf_token, timeout=LLM_TIMEOUT)
+_client = AsyncInferenceClient(token=settings.hf_token or None, timeout=LLM_TIMEOUT)
+_THINK = re.compile(r"<think>.*?</think>", re.S)
+
+
+async def _nvidia_chat(model: str, messages: list[dict], max_tokens: int, temperature: float) -> str:
+    """One call to NVIDIA's OpenAI-compatible /chat/completions."""
+    body = {
+        "model": model,
+        "messages": messages,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        # Nemotron "thinks" before answering by default: great for puzzles,
+        # seconds too slow for a voice chat.
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
+    headers = {"Authorization": f"Bearer {settings.nvidia_api_key}"}
+    timeout = aiohttp.ClientTimeout(total=LLM_TIMEOUT)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.post(
+            f"{settings.nvidia_base_url}/chat/completions", json=body, headers=headers
+        ) as resp:
+            data = await resp.json(content_type=None)
+            if resp.status != 200:
+                detail = (data or {}).get("error") or (data or {}).get("detail") or data
+                raise RuntimeError(f"NVIDIA {resp.status}: {str(detail)[:200]}")
+    content = data["choices"][0]["message"].get("content") or ""
+    return _THINK.sub("", content).strip()
 
 # action → (tool name in MusicManager.execute_tool)
 ACTION_TO_TOOL = {
@@ -82,6 +109,20 @@ async def call_llm(
     if not _quota_ok():
         log.warning("[AI] HF_CALLS_PER_MIN reached — skipping LLM call")
         return None
+    global _last_failure
+    if settings.nvidia_api_key:
+        for model in settings.nvidia_models:
+            started = time.monotonic()
+            try:
+                text = await _nvidia_chat(model, messages, max_tokens, temperature)
+                log.info("[AI] %s answered in %.1fs", model, time.monotonic() - started)
+                if text:
+                    return text
+            except Exception as exc:
+                _last_failure = f"{type(exc).__name__}: {str(exc)[:200]}"
+                log.warning("[AI] %s failed: %s", model, _last_failure)
+    if not settings.hf_token:
+        return None
     for model in models or settings.hf_models:
         started = time.monotonic()
         try:
@@ -96,7 +137,6 @@ async def call_llm(
             if text:
                 return text
         except Exception as exc:
-            global _last_failure
             text_exc = str(exc)
             if "402" in text_exc:
                 _last_failure = "Hugging Face credits are used up (402 Payment Required)"
@@ -150,7 +190,7 @@ _ERRORS = {
     "stream_failed": "Found it but couldn't stream it. Try another version or song?",
     "ffmpeg_error": "My audio player tripped. Try again in a sec.",
     "nothing_playing": "Nothing's playing right now.",
-    "not_paused": "It's not paused.",
+    "not_paused": "It's already playing. Say the song name with play to change it.",
     "invalid_index": "There's no song at that spot in the queue.",
     "empty_query": "Play what though?",
 }
@@ -241,7 +281,7 @@ def _system(music_state: dict | None, mood_note: str, extra: str) -> str:
 # Words that must be in a spoken phrase (without the bot's name) before an
 # action may change the music. Looking/asking (now_playing, show_queue) is free.
 _COMMAND_WORDS = {
-    "play": r"play|put on|put|queue|add|bajau|baja|lagau|lagaideu",
+    "play": r"play|put on|put|queue|add|bajau|bajaideu|bajaa|baja|lagau|lagaideu",
     "volume": r"volume|louder|quieter|loud|turn (it |the music )?(up|down)|increase|decrease|lower|raise|mute",
     "skip": r"skip|next|change",
     # "tap"/"top": speech-to-text often clips the s off "stop" over music
@@ -325,18 +365,29 @@ async def process_message(
     guesses: list[str] | None = None,
     announce: Callable[[str], Awaitable[Any]] | None = None,
     require_command_words: bool = False,
+    allow_llm: bool = True,
 ) -> str:
-    """Turn one request (typed or spoken) into an action + what Milo says."""
+    """Turn one request (typed or spoken) into an action + what Milo says.
+
+    Commands (play X, skip, stop, pause, volume up…) never reach the LLM. Only
+    what the parser doesn't understand does, and only when allow_llm is set
+    (the bot was addressed by name, @mention or reply).
+    """
     volume = (music_state or {}).get("volume", 80)
 
-    # Fast path: one-word controls ("skip", "pause", "volume 30") need no LLM.
-    # Anything with a song name goes to the model so it can fix the spelling.
+    # Fast path: clear commands ("skip", "pause", "volume up", "play X") need no LLM.
     cmd = parse_command(user_text, volume)
     if cmd and require_command_words and not _has_command_words(cmd["action"], [user_text]):
         cmd = None  # casual "wait" / "bye" in conversation shouldn't touch the music
     if cmd:
         action = cmd["action"]
-        return _canned(action, await _run(action, cmd, tool_executor))
+        result = await _run(action, cmd, tool_executor)
+        if action in ("play", "queue") and result.get("success"):
+            return _track_line(result)
+        return _canned(action, result)
+
+    if not allow_llm:
+        return ""
 
     # Everything else: the model classifies the intent, cleans up the song
     # name and writes the reply. The last conversation entry is this request,
