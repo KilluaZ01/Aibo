@@ -33,6 +33,7 @@ import discord
 import numpy as np
 
 from config import settings
+from ai.intent import parse_command
 from voice import stt
 
 log = logging.getLogger("nova.voice.listener")
@@ -101,6 +102,24 @@ def said_name(text: str) -> bool:
             ):
                 return True
     return False
+
+
+def _command_in_guesses(guesses: list[str]) -> str:
+    """A clear command in any guess, after a misheard name of up to 3 words.
+
+    The name was heard in one guess; another may have the command right
+    ("willow the music" / "we will stop the music" → "stop the music").
+    """
+    for guess in guesses:
+        heard, rest = split_wake_word(guess)
+        if heard and rest and parse_command(rest) is not None:
+            return rest
+        words = re.sub(r"[^\w\s'%]", " ", guess.lower()).split()
+        for i in range(1, min(3, len(words) - 1) + 1):
+            tail = " ".join(words[i:])
+            if parse_command(tail) is not None:
+                return tail
+    return ""
 
 
 def split_wake_word(text: str) -> tuple[bool, str]:
@@ -426,6 +445,10 @@ class VoiceListener:
                 heard, rest = split_wake_word(alt)
                 if heard:
                     text = alt
+            # A runner-up that is a clear command ("Milo stop" behind "Milo top")
+            # beats a top guess only the LLM could make sense of.
+            if heard and parse_command(rest) is None:
+                rest = _command_in_guesses(guesses) or rest
             # Put the guess we went with first; the LLM sees all of them.
             guesses = [text] + [g for g in guesses if g != text]
 
@@ -453,7 +476,8 @@ class VoiceListener:
             log.info("[Voice] %s: %s", member, command)
             self._busy += 1
             try:
-                named = any(said_name(g) for g in guesses)
+                # Said the name now, or just before ("Milo" … "describe this song").
+                named = armed or any(said_name(g) for g in guesses)
                 await self._on_command(member, command, guesses, named)
                 self._follow_up[member.id] = time.monotonic() + FOLLOW_UP
             finally:

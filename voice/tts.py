@@ -28,12 +28,30 @@ _EMOJI = re.compile(
 MAX_CHARS = 300
 
 
+def _short_title(card: str) -> str:
+    """'🎵 **Billie Eilish - ocean eyes (Official Music Video)** — Billie Eilish' → 'ocean eyes'."""
+    m = re.search(r"\*\*(.+?)\*\*", card)
+    title = m.group(1) if m else card
+    title = re.sub(r"[(\[][^)\]]*[)\]]", "", title)  # (Official Music Video), [Lyrics]
+    title = re.sub(r"\b(official|lyrics?|video|audio|hd|4k)\b", "", title, flags=re.I)
+    if " - " in title:  # "Artist - Song"
+        title = title.split(" - ", 1)[1]
+    return re.sub(r"\s+", " ", title).strip(" -|") or "it"
+
+
 def speakable(reply: str) -> str:
     """The part of a chat reply worth saying out loud."""
     lines = [l.strip() for l in reply.splitlines() if l.strip()]
     # Prefer the conversational line over the "🎵 **Title** — Artist" card.
     talk = [l for l in lines if not l.startswith(("🎵", "➕", "🎙️"))]
-    text = " ".join(talk) if talk else (lines[0] if lines else "")
+    if talk:
+        text = " ".join(talk)
+    elif lines and lines[0].startswith(("🎵", "➕")):
+        # Only the card: "Playing ocean eyes", not the whole YouTube title.
+        verb = "Added" if lines[0].startswith("➕") else "Playing"
+        text = f"{verb} {_short_title(lines[0])}"
+    else:
+        text = lines[0] if lines else ""
     text = re.sub(r"[*_`~>|]", "", text)
     text = _EMOJI.sub("", text)
     text = re.sub(r"\(#\d+ in queue\)", "", text)

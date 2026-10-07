@@ -56,6 +56,16 @@ def record_bot_spoke(channel_id: int) -> None:
     _bot_last_spoke[channel_id] = datetime.utcnow()
 
 
+def is_addressed(message: discord.Message, bot_user: discord.ClientUser) -> bool:
+    """@mention, reply to the bot, or starts with its name: only these may use the LLM."""
+    if bot_user in message.mentions:
+        return True
+    ref = message.reference
+    if ref and isinstance(ref.resolved, discord.Message) and ref.resolved.author == bot_user:
+        return True
+    return bool(_NAME_START.match(message.content))
+
+
 def should_process(message: discord.Message, bot_user: discord.ClientUser) -> bool:
     """
     Return True if this message should be sent to the LLM.

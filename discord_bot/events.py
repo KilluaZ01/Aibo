@@ -15,7 +15,7 @@ from typing import Optional
 import discord
 
 from config import settings
-from ai.router import should_process, strip_mention, record_bot_spoke
+from ai.router import should_process, is_addressed, strip_mention, record_bot_spoke
 from ai.client import process_message, comment_on_track
 from ai.mood import MoodTracker
 from discord_bot.context import ConversationContext
@@ -120,6 +120,9 @@ def register_events(
                 # word ("Milo play…", "Milo volume…"). Even after the name, a
                 # stray word ("Milo… my") must not become a song.
                 require_command_words=spoken,
+                # Unrecognised requests only go to the LLM when the bot was
+                # addressed ("Milo, describe this song"); stray chat is ignored.
+                allow_llm=named,
             )
         except Exception as exc:
             log.error("LLM processing error: %s", exc, exc_info=True)
@@ -193,7 +196,8 @@ def register_events(
         reply_channels[message.guild.id] = message.channel
         async with message.channel.typing():
             await handle_request(
-                message.guild, message.author, user_text, message.channel, spoken=False
+                message.guild, message.author, user_text, message.channel, spoken=False,
+                named=is_addressed(message, bot.user),
             )
 
     @bot.event

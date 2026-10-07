@@ -1,10 +1,10 @@
 """
 ai/intent.py — deterministic fast path for clear music commands.
 
-"skip", "pause", "volume 30", "play K by Cigarettes After Sex" don't need an
-LLM to understand. Handling them here keeps voice commands snappy and saves
-the free Hugging Face quota for the requests that actually need judgement
-("play something for a rainy night", "I'm sad").
+"skip", "pause", "volume up", "play K by Cigarettes After Sex" don't need an
+LLM to understand. Handling them here keeps voice commands snappy, keeps them
+working when the AI is down, and saves tokens for the requests that actually
+need judgement ("describe this song", "play something for a rainy night").
 
 parse_command() returns an action dict or None when the LLM should decide.
 """
@@ -37,13 +37,15 @@ def parse_command(text: str, current_volume: int = 80) -> dict | None:
     if re.fullmatch(
         # "ski"/"sk"/"kip": speech-to-text often clips "skip"
         r"(skip|ski|sk|skeep|kip|next|next song|next one|skip (it|this|this one|this song|song)|nah skip( this| it)?"
-        r"|change|change (it|this|this song|the song|song)|another (one|song)|play (another|something else))",
+        r"|change|change (it|this|this song|the song|song)|another (one|song)|play (another|something else)( one| song)?)",
         t,
     ):
         return {"action": "skip"}
     if re.fullmatch(r"(pause|pause (it|the music|this)|hold (on|the music)|wait)", t):
         return {"action": "pause"}
-    if re.fullmatch(r"(resume|continue|unpause|play again|keep playing|resume (it|the music))", t):
+    if re.fullmatch(
+        r"(resume|continue|unpause|play|play again|play it|play (the )?music|keep playing|resume (it|the music))", t
+    ):
         return {"action": "resume"}
     if re.fullmatch(r"(stop|stop (it|the music|the song|this song|music|playing|everything))", t):
         return {"action": "stop"}
@@ -57,6 +59,14 @@ def parse_command(text: str, current_volume: int = 80) -> dict | None:
         return {"action": "show_queue"}
     if re.fullmatch(r"(clear|clear (the )?queue|empty the queue)", t):
         return {"action": "clear_queue"}
+
+    # Clipped or padded ("stop the", "pause it for now", "skip that one please"):
+    # a short phrase that starts with the command, with no second request after it.
+    m = re.fullmatch(
+        r"(stop|pause|skip)((?: (?:it|the|this|that|music|song|one|now|for|a|sec|please|pls|bro|yaar))*)", t
+    )
+    if m:
+        return {"action": m.group(1)}
 
     m = re.fullmatch(r"(?:set )?(?:the )?vol(?:ume)?(?: to)? (\d{1,3})%?", t)
     if m:
@@ -87,6 +97,12 @@ def parse_command(text: str, current_volume: int = 80) -> dict | None:
         t,
     ):
         return {"action": "volume", "level": max(0, current_volume - 20)}
+    if re.fullmatch(r"(volume|vol) (up|increase|higher|louder)( a bit| a little| more)?", t):
+        return {"action": "volume", "level": min(100, current_volume + 20)}
+    if re.fullmatch(r"(volume|vol) (down|decrease|lower|quieter)( a bit| a little| more)?", t):
+        return {"action": "volume", "level": max(0, current_volume - 20)}
+    if re.fullmatch(r"(full volume|max volume|volume (full|max)|full blast)", t):
+        return {"action": "volume", "level": 100}
     if re.fullmatch(r"(mute)", t):
         return {"action": "volume", "level": 0}
 
@@ -97,6 +113,33 @@ def parse_command(text: str, current_volume: int = 80) -> dict | None:
         if idx:
             return {"action": "remove", "index": idx}
 
-    # Song requests ("play oben eyes") are left to the LLM on purpose: it
-    # fixes misheard names and picks the right song before we search.
-    return None
+    return _parse_play(t)
+
+
+# "play something sad", "play some chill music": no song named, the LLM picks one.
+_VAGUE = re.compile(
+    r"^(something|some |anything|a song|any song|songs? (for|that)|music (for|that)|"
+    r"whatever|what ?ever|you choose|your choice|my favou?rite)", re.I
+)
+
+
+def _parse_play(t: str) -> dict | None:
+    """'play X' / 'play X next' / 'play X now' / 'X bajau' → search for X as said."""
+    action = "play"
+    m = re.fullmatch(r"(?:play|put on|bajau|lagau)\s+(.+?)\s+(?:now|right now|instead)", t)
+    if m:
+        action = "play_now"
+    else:
+        m = re.fullmatch(r"(?:play|put on)\s+(.+?)\s+(?:next|after this(?: one)?)", t) or \
+            re.fullmatch(r"(?:queue|add)\s+(.+?)(?:\s+(?:to|in)\s+(?:the\s+)?queue|\s+next)?", t)
+        if m:
+            action = "queue"
+        else:
+            m = re.fullmatch(r"(?:play|put on|bajau|lagau)\s+(.+)", t) or \
+                re.fullmatch(r"(.+?)\s+(?:bajau|bajaideu|bajaa|lagau|lagaideu)", t)
+    if not m:
+        return None
+    query = re.sub(r"^(the song |song |me |us )", "", m.group(1).strip()).strip()
+    if not query or _VAGUE.match(query):
+        return None
+    return {"action": action, "query": query}
